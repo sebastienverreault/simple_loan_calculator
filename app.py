@@ -1,3 +1,5 @@
+import os
+
 from dash import Dash, html, dcc
 from dash.dependencies import Input, Output, State
 import dash_bootstrap_components as dbc
@@ -13,6 +15,7 @@ import locale
 
 current_locale = locale.setlocale( locale.LC_ALL, 'en_CA.UTF-8' )
 
+
 class TimeValueOfMoney:
     # assume 'times' and 'cash_flows' columns
     def __init__(
@@ -23,9 +26,9 @@ class TimeValueOfMoney:
         self.ACCURACY = 0.00005
         self.MAX_ITERATIONS = 200
         self.interest_rate = interest_rate
-        print(self.interest_rate)
+        # print(self.interest_rate)
         self.time_cash_flows_df = time_cash_flows_df
-        print(self.time_cash_flows_df)
+        # print(self.time_cash_flows_df)
 
     def loan_pv(self, interest_rate=None):
         if interest_rate is None:
@@ -198,6 +201,8 @@ class SimpleLoanCalculator:
             min_apr = origination_fee * loan_interest_rate * dcf
             max_apr =             1.0 * loan_interest_rate * dcf
             apr = [min_apr, max_apr]
+        # no fees
+        self.apr_no_origination_fee = loan_interest_rate * dcf
         # annualized
         annualized_apr = [a**dcf for a in apr]
         final_payment = loan_principal + monthly_30_day_interest
@@ -379,11 +384,216 @@ class SimpleLoanCalculator:
             result = (int(d2) - int(d1)) + \
             30.0*(int(end_date.month) - int(start_date.month)) + \
             day_per_year*(int(end_date.year) - int(start_date.year))
-            print(f"#days used for '30/{day_per_year}': {result}")
+            # print(f"#days used for '30/{day_per_year}': {result}")
             result = result / day_per_year
         else:
             raise RuntimeError(f"Unsupported convention: '{convention}'")
         return result
+
+class CvlCalculator:
+    def __init__(
+        self,
+        apr,
+        mc_to_liq_time_period,
+        mc_to_liq_confidence_level,
+        mc_to_liq_time_horizon,
+        mc_to_liq_var_not_cvar,
+        init_to_mc_time_period,
+        init_to_mc_confidence_level,
+        init_to_mc_time_horizon,
+        init_to_mc_var_not_cvar
+    ):
+        #
+        # Raw Data & time resampling
+        #
+        my_dir = os.path.dirname(__file__)
+        file_path = os.path.join(my_dir, 'BTC-USD_20140917-20250210.csv')
+        # print(file_path)
+
+        try:
+            btcusd_1min = pd.read_csv(file_path, sep=",", header=0, names=["date","open","high","low","close","adj_close","volume"], index_col="date", parse_dates=True)
+            print(btcusd_1min)
+
+            # daily close & forward fill
+            btcusd_1day_px = btcusd_1min.resample('1D')['close'].last().ffill().bfill()
+            # 3 days close & forward fill
+            btcusd_3day_px = btcusd_1min.resample('3D')['close'].last().ffill().bfill()
+            # weekly close & forward fill
+            btcusd_1week_px = btcusd_1min.resample('1W')['close'].last().ffill().bfill()
+            # 2-weekly close & forward fill
+            btcusd_2week_px = btcusd_1min.resample('2W')['close'].last().ffill().bfill()
+            # 3-weekly close & forward fill
+            btcusd_3week_px = btcusd_1min.resample('3W')['close'].last().ffill().bfill()
+            # monthly close & forward fill
+            btcusd_1month_px = btcusd_1min.resample('1M')['close'].last().ffill().bfill()
+            # # 3-monthly close & forward fill
+            # btcusd_3month_px = btcusd_1min.resample('3M')['close'].last().ffill().bfill()
+            # # 6-monthly close & forward fill
+            # btcusd_6month_px = btcusd_1min.resample('6M')['close'].last().ffill().bfill()
+            # # yearly close & forward fill
+            # btcusd_1year_px = btcusd_1min.resample('1YE')['close'].last().ffill().bfill()
+            message = "success!"
+
+            #
+            # Log-returns
+            #
+            btcusd_1day_log_ret = np.log(btcusd_1day_px / btcusd_1day_px.shift(1)).dropna()
+            btcusd_3day_log_ret = np.log(btcusd_3day_px / btcusd_3day_px.shift(1)).dropna()
+            btcusd_1week_log_ret = np.log(btcusd_1week_px / btcusd_1week_px.shift(1)).dropna()
+            btcusd_2week_log_ret = np.log(btcusd_2week_px / btcusd_2week_px.shift(1)).dropna()
+            btcusd_3week_log_ret = np.log(btcusd_3week_px / btcusd_3week_px.shift(1)).dropna()
+            btcusd_1month_log_ret = np.log(btcusd_1month_px / btcusd_1month_px.shift(1)).dropna()
+            # btcusd_3month_log_ret = np.log(btcusd_3month_px / btcusd_3month_px.shift(1)).dropna()
+            # btcusd_6month_log_ret = np.log(btcusd_6month_px / btcusd_6month_px.shift(1)).dropna()
+            # btcusd_1year_log_ret = np.log(btcusd_1year_px / btcusd_1year_px.shift(1)).dropna()
+
+            ################### Initial Inputs ###################
+            if mc_to_liq_time_period.startswith('1-day'):
+                mc_to_liq_btcusd_log_ret = btcusd_1day_log_ret
+            elif mc_to_liq_time_period.startswith('3-day'):
+                mc_to_liq_btcusd_log_ret = btcusd_3day_log_ret
+            elif mc_to_liq_time_period.startswith('1-week'):
+                mc_to_liq_btcusd_log_ret = btcusd_1week_log_ret
+            else:
+                raise RuntimeError(f"Unsupported basis: '{mc_to_liq_time_period}'")
+
+            if mc_to_liq_confidence_level.startswith('99.99%'):
+                mc_to_liq_cl = 100 - 99.99
+            elif mc_to_liq_confidence_level.startswith('99.9%'):
+                mc_to_liq_cl = 100 - 99.9
+            elif mc_to_liq_confidence_level.startswith('99%'):
+                mc_to_liq_cl = 100 - 99
+            elif mc_to_liq_confidence_level.startswith('95%'):
+                mc_to_liq_cl = 100 - 95
+            else:
+                raise RuntimeError(f"Unsupported basis: '{mc_to_liq_confidence_level}'")
+
+            if init_to_mc_time_period.startswith('1-week'):
+                init_to_mc_btcusd_log_ret = btcusd_1week_log_ret
+            elif init_to_mc_time_period.startswith('2-weeks'):
+                init_to_mc_btcusd_log_ret = btcusd_2week_log_ret
+            elif init_to_mc_time_period.startswith('3-weeks'):
+                init_to_mc_btcusd_log_ret = btcusd_3week_log_ret
+            elif init_to_mc_time_period.startswith('1-month'):
+                init_to_mc_btcusd_log_ret = btcusd_1month_log_ret
+            else:
+                raise RuntimeError(f"Unsupported basis: '{init_to_mc_time_period}'")
+
+            if init_to_mc_confidence_level.startswith('99.99%'):
+                init_to_mc_cl = 100 - 99.99
+            elif init_to_mc_confidence_level.startswith('99.9%'):
+                init_to_mc_cl = 100 - 99.9
+            elif init_to_mc_confidence_level.startswith('99%'):
+                init_to_mc_cl = 100 - 99
+            elif init_to_mc_confidence_level.startswith('95%'):
+                init_to_mc_cl = 100 - 95
+            else:
+                raise RuntimeError(f"Unsupported basis: '{init_to_mc_confidence_level}'")
+
+            #
+            # Volatility
+            #
+            mc_to_liq_vol = mc_to_liq_btcusd_log_ret.tail(mc_to_liq_time_horizon).std()
+            init_to_mc_vol = init_to_mc_btcusd_log_ret.tail(init_to_mc_time_horizon).std()
+
+            #
+            # VaR
+            #
+            mc_to_liq_var = np.percentile(mc_to_liq_btcusd_log_ret.tail(mc_to_liq_time_horizon), mc_to_liq_cl)
+            init_to_mc_var = np.percentile(init_to_mc_btcusd_log_ret.tail(init_to_mc_time_horizon), init_to_mc_cl)
+
+            #
+            # CVaR
+            #
+            mc_to_liq_cvar = mc_to_liq_btcusd_log_ret[mc_to_liq_btcusd_log_ret < mc_to_liq_var].mean()
+            init_to_mc_cvar = init_to_mc_btcusd_log_ret[init_to_mc_btcusd_log_ret < init_to_mc_var].mean()
+
+            #
+            # Expected Loss
+            #
+            if mc_to_liq_var_not_cvar:
+                mc_to_liq_loss = abs(mc_to_liq_var)
+            else:
+                mc_to_liq_loss = abs(mc_to_liq_cvar)
+
+            if init_to_mc_var_not_cvar:
+                init_to_mc_loss = abs(init_to_mc_var)
+            else:
+                init_to_mc_loss = abs(init_to_mc_cvar)
+
+            #
+            # Liquidation CVL / LTV
+            #
+            liquidation_cvl = 1 + apr
+            liquidation_ltv = 1 / liquidation_cvl
+
+            #
+            # Margin Call CVL / LTV
+            #
+            margin_call_cvl = 1 + apr + mc_to_liq_loss
+            margin_call_ltv = 1 / margin_call_cvl
+
+            #
+            # Initial CVL / LTV
+            #
+            initial_cvl = 1 + apr + mc_to_liq_loss + init_to_mc_loss
+            initial_ltv = 1 / initial_cvl
+
+            self.data = [
+                ['', ''],
+                ['-----= CVLs / LTVs Calculations =-----', ''],
+                ['-----= Inputs =-----', ''],
+                ['Liquidation Recovery APR', '{:,.2f}%'.format(apr * 100)],
+                ['', ''],
+                ['Margin Call - Time Period', mc_to_liq_time_period],
+                ['Margin Call - Confidence Level', mc_to_liq_confidence_level],
+                ['Margin Call - Time Horizon', '{:,.0f} samples'.format(mc_to_liq_time_horizon)],
+                ['Margin Call - Loss estimation using: ', ('CVaR', 'Var')[mc_to_liq_var_not_cvar]],
+                ['Margin Call - Implied Volatility', '{:,.2f}%'.format(mc_to_liq_vol * 100)],
+                ['', ''],
+                ['Initial - Time Period', init_to_mc_time_period],
+                ['Initial - Confidence Level', init_to_mc_confidence_level],
+                ['Initial - Time Horizon', '{:,.0f} samples'.format(init_to_mc_time_horizon)],
+                ['Initial - Loss estimation using: ', ('CVaR', 'Var')[init_to_mc_var_not_cvar]],
+                ['Initial - Implied Volatility', '{:,.2f}%'.format(init_to_mc_vol * 100)],
+
+                ['-----= Outputs =-----', ''],
+                ['-----= CVLs =-----', ''],
+                ['Initial CVL', '{:,.0f}%'.format(initial_cvl * 100)],
+                ['Margin Call CVL', '{:,.0f}%'.format(margin_call_cvl * 100)],
+                ['Liquidation CVL', '{:,.0f}%'.format(liquidation_cvl * 100)],
+
+                ['-----= LTVs =-----', ''],
+                ['Initial LTV', '{:,.0f}%'.format(initial_ltv * 100)],
+                ['Margin Call LTV', '{:,.0f}%'.format(margin_call_ltv * 100)],
+                ['Liquidation LTV', '{:,.0f}%'.format(liquidation_ltv * 100)],
+
+                ['-----= Details =-----', ''],
+                ['Margin Call - Vol', '{:,.2f}%'.format(mc_to_liq_vol * 100)],
+                ['Margin Call - VaR', '{:,.2f}%'.format(mc_to_liq_var * 100)],
+                ['Margin Call - CVaR', '{:,.2f}%'.format(mc_to_liq_cvar * 100)],
+                ['Margin Call - Expected Loss', '{:,.2f}%'.format(mc_to_liq_loss * 100)],
+                ['', ''],
+                ['Initial - Vol', '{:,.2f}%'.format(init_to_mc_vol * 100)],
+                ['Initial - VaR', '{:,.2f}%'.format(init_to_mc_var * 100)],
+                ['Initial - CVaR', '{:,.2f}%'.format(init_to_mc_cvar * 100)],
+                ['Initial - Expected Loss', '{:,.2f}%'.format(init_to_mc_loss * 100)],
+                ['', ''],
+            ]
+
+        except Exception as e:
+            message = f"Exception: {e}"
+            self.data = [
+                ['-----= CVLs / LTVs Calculations =-----', ''],
+                ['file_path', file_path],
+                ['message', message],
+            ]
+
+            return
+
+    def table_df(self):
+        return pd.DataFrame(self.data, columns=['Field', 'Value'])
+
 
 def calc_table_height(df, base=50, height_per_row=20, char_limit=30, height_padding=19):
     '''
@@ -439,6 +649,18 @@ day_count_convention_sel = ['30/360', '30/365', 'actual/360', 'actual/365', 'act
 # actual/365 => first due date is end_of_month(start) @ DaysBetween(start, end_of_month)*IR/365, and so on for duration times
 # actual/actual => first due date is end_of_month(start) @ DaysBetween(start, end_of_month)*IR/DaysInYear, and so on for duration times
 
+step = 0.005
+liquidation_apr_sel = np.arange(0.05, 0.25 + step, step)
+mc_to_liq_time_period_sel = ['1-day', '3-days', '1-week']
+mc_to_liq_confidence_level_sel = ['95%', '99%', '99.9%', '99.99%']
+mc_to_liq_time_horizon_sel = [30, 60, 90, 120]
+mc_to_liq_var_not_cvar_sel = [True, False]
+
+init_to_mc_time_period_sel = ['1-week', '2-weeks', '3-weeks', '1-month']
+init_to_mc_confidence_level_sel = ['95%', '99%', '99.9%', '99.99%']
+init_to_mc_time_horizon_sel = [30, 60, 90, 120]
+init_to_mc_var_not_cvar_sel = [True, False]
+
 ################### Initial Inputs ###################
 pre_set = pre_set_sel[0]
 loan_principal = loan_principal_sel[0]
@@ -458,6 +680,15 @@ start_date = start_date_sel[0]
 duration = duration_sel[0]
 day_count_convention = day_count_convention_sel[2]
 
+liquidation_apr = liquidation_apr_sel[round(len(liquidation_apr_sel)/4)]
+mc_to_liq_time_period = mc_to_liq_time_period_sel[1]
+mc_to_liq_confidence_level = mc_to_liq_confidence_level_sel[0]
+mc_to_liq_time_horizon = mc_to_liq_time_horizon_sel[2]
+mc_to_liq_var_not_cvar = mc_to_liq_var_not_cvar_sel[-1]
+init_to_mc_time_period = init_to_mc_time_period_sel[-1]
+init_to_mc_confidence_level = init_to_mc_confidence_level_sel[0]
+init_to_mc_time_horizon = init_to_mc_time_horizon_sel[2]
+init_to_mc_var_not_cvar = init_to_mc_var_not_cvar_sel[-1]
 
 ################### Dashboard ###################
 app = Dash(__name__, external_stylesheets=[dbc.themes.FLATLY])
@@ -631,6 +862,105 @@ app.layout = dbc.Container([
                     options=[{"label": f"{x}", "value": x} for x in [True, False]],
                     value=True,
                 ),
+            ]),
+
+            html.Br(),
+
+            html.Div([
+                html.H2('Liquidation Recovery APR:'),
+                dcc.Dropdown(
+                    id="liquidation-apr",
+                    options=[{"label": '{:,.2f}%'.format(x * 100), "value": x} for x in liquidation_apr_sel],
+                    value=liquidation_apr,
+                    clearable=False,
+                    optionHeight=40,
+                    className='customDropdown'
+                ),
+            ]),
+            html.Div([
+                html.H2('Margin Call to Liquidation Time Period:'),
+                dcc.Dropdown(
+                    id="mc-to-liq-time-period",
+                    options=[{"label": x, "value": x} for x in mc_to_liq_time_period_sel],
+                    value=mc_to_liq_time_period,
+                    clearable=False,
+                    optionHeight=40,
+                    className='customDropdown'
+                ),
+            ]),
+            html.Div([
+                html.H2('Margin Call to Liquidation Confidence Level:'),
+                dcc.Dropdown(
+                    id="mc-to-liq-confidence-level",
+                    options=[{"label": x, "value": x} for x in mc_to_liq_confidence_level_sel],
+                    value=mc_to_liq_confidence_level,
+                    clearable=False,
+                    optionHeight=40,
+                    className='customDropdown'
+                ),
+            ]),
+            html.Div([
+                html.H2('Margin Call to Liquidation Time Horizon:'),
+                dcc.Dropdown(
+                    id="mc-to-liq-time-horizon",
+                    options=[{"label": x, "value": x} for x in mc_to_liq_time_horizon_sel],
+                    value=mc_to_liq_time_horizon,
+                    clearable=False,
+                    optionHeight=40,
+                    className='customDropdown'
+                ),
+            ]),
+            html.Div([
+                html.H2('Margin Call to Liquidation use VaR? CVaR?:'),
+                dcc.RadioItems(
+                    id="mc-to-liq-var-not-cvar",
+                    options=[{"label": f"{x}", "value": x} for x in mc_to_liq_var_not_cvar_sel],
+                    value=True,
+                ),
+            ]),
+
+            html.Br(),
+
+            html.Div([
+                html.H2('Initial to first Margin Call Time Period:'),
+                dcc.Dropdown(
+                    id="init-to-mc-time-period",
+                    options=[{"label": x, "value": x} for x in init_to_mc_time_period_sel],
+                    value=init_to_mc_time_period,
+                    clearable=False,
+                    optionHeight=40,
+                    className='customDropdown'
+                ),
+            ]),
+            html.Div([
+                html.H2('Initial to first Margin Call Confidence Level:'),
+                dcc.Dropdown(
+                    id="init-to-mc-confidence-level",
+                    options=[{"label": x, "value": x} for x in init_to_mc_confidence_level_sel],
+                    value=init_to_mc_confidence_level,
+                    clearable=False,
+                    optionHeight=40,
+                    className='customDropdown'
+                ),
+            ]),
+            html.Div([
+                html.H2('Initial to first Margin Call Time Horizon:'),
+                dcc.Dropdown(
+                    id="init-to-mc-time-horizon",
+                    options=[{"label": x, "value": x} for x in init_to_mc_time_horizon_sel],
+                    value=init_to_mc_time_horizon,
+                    clearable=False,
+                    optionHeight=40,
+                    className='customDropdown'
+                ),
+            ]),
+            html.Div([
+                html.H2('Initial to first Margin Call use VaR? CVaR?:'),
+                dcc.RadioItems(
+                    id="init-to-mc-var-not-cvar",
+                    options=[{"label": f"{x}", "value": x} for x in init_to_mc_var_not_cvar_sel],
+                    value=True,
+                ),
             ])
         ], style={'margin-left': 15, 'margin-right': 15, 'margin-top': 30})
     ], style={
@@ -678,6 +1008,18 @@ app.layout = dbc.Container([
     Input("duration", "value"),
     Input("day-count-convention", "value"),
     Input("log-scale", "value"),
+
+    Input("liquidation-apr", "value"),
+
+    Input("mc-to-liq-time-period", "value"),
+    Input("mc-to-liq-confidence-level", "value"),
+    Input("mc-to-liq-time-horizon", "value"),
+    Input("mc-to-liq-var-not-cvar", "value"),
+
+    Input("init-to-mc-time-period", "value"),
+    Input("init-to-mc-confidence-level", "value"),
+    Input("init-to-mc-time-horizon", "value"),
+    Input("init-to-mc-var-not-cvar", "value"),
 )
 def update_graph1(
         pre_set,
@@ -694,6 +1036,15 @@ def update_graph1(
         duration,
         day_count_convention,
         log_scale,
+        liquidation_apr,
+        mc_to_liq_time_period,
+        mc_to_liq_confidence_level,
+        mc_to_liq_time_horizon,
+        mc_to_liq_var_not_cvar,
+        init_to_mc_time_period,
+        init_to_mc_confidence_level,
+        init_to_mc_time_horizon,
+        init_to_mc_var_not_cvar,
     ):
     fig = make_subplots(
         rows=2, cols=1,
@@ -742,7 +1093,29 @@ def update_graph1(
         str(day_count_convention)
     )
 
-    table_df = loan_calc.table_df()
+    loan_calc_df = loan_calc.table_df()
+
+    cvl_calc = CvlCalculator(
+        # loan_calc.apr_no_origination_fee,
+        liquidation_apr,
+        mc_to_liq_time_period,
+        mc_to_liq_confidence_level,
+        mc_to_liq_time_horizon,
+        mc_to_liq_var_not_cvar,
+        init_to_mc_time_period,
+        init_to_mc_confidence_level,
+        init_to_mc_time_horizon,
+        init_to_mc_var_not_cvar
+    )
+
+    cvl_calc_df = cvl_calc.table_df()
+
+    table_df = pd.concat([loan_calc_df, cvl_calc_df], ignore_index=True, sort=False)
+
+    # print(loan_calc_df)
+    # print(cvl_calc_df)
+    # print(table_df)
+
     fig.add_trace(go.Table(
                     header=dict(values = list(table_df.columns), align="left"),
                     cells=dict(values=[table_df.Field, table_df.Value], align="left"),
@@ -797,15 +1170,15 @@ def update_graph1(
         # plot_bgcolor='#6d6d71',
         # plot_bgcolor='#ffffff',
         width=950,
-        height=1240,
+        height=1940,
         # height=calc_table_height(table_df, height_per_row=23),
         showlegend=True,
         # margin=dict(l=0,r=0,t=0,b=0)
     )
     return fig
 
-#if __name__ == "__main__":
+# if __name__ == "__main__":
 #    # Turn off reloader if inside Jupyter
-#    app.run_server(debug=True, port=8051, use_reloader=True)
+#    app.run(debug=True, port=8051, use_reloader=True)
 
 application = app.server
