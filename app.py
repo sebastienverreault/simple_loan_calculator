@@ -202,7 +202,7 @@ class SimpleLoanCalculator:
             max_apr =             1.0 * loan_interest_rate * dcf
             apr = [min_apr, max_apr]
         # no fees
-        self.apr_no_origination_fee = loan_interest_rate * dcf
+        apr_no_origination_fee = loan_interest_rate * dcf
         # annualized
         annualized_apr = [a**dcf for a in apr]
         final_payment = loan_principal + monthly_30_day_interest
@@ -306,6 +306,7 @@ class SimpleLoanCalculator:
             ['Yield to Maturity @ par', '{:,.4f}%'.format(ytm_from_price * 100)],
             ['Macaulay Duration @ par', '{:,.2f} years'.format(mac_d_from_price)],
             ['Modified Duration @ par', '{:,.4f}%'.format(mod_d_from_price)],
+            ['APR no fees', '{:,.2f}%'.format(apr_no_origination_fee * 100)],
         ]
 
     def table_df(self):
@@ -1096,7 +1097,6 @@ def update_graph1(
     loan_calc_df = loan_calc.table_df()
 
     cvl_calc = CvlCalculator(
-        # loan_calc.apr_no_origination_fee,
         liquidation_apr,
         mc_to_liq_time_period,
         mc_to_liq_confidence_level,
